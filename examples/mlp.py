@@ -91,5 +91,5 @@ def example_mlp_regressor() -> None:
 
 
 if __name__ == "__main__":
-    example_mlp_classifier()
+    # example_mlp_classifier()
     example_mlp_regressor()

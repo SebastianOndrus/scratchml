@@ -242,30 +242,74 @@ class DecisionTreeBase(ABC):
             X (np.ndarray): the features array.
             y (np.ndarray): the classes array.
             feature_indexes (List): a list containing the index of the features that
-                wasn't used yet.
+                weren't used yet.
 
         Returns:
-            Tuple[int, Union[int, float]]: the information gain, best feature index
+            Tuple[float, int, Union[int, float]]: the information gain, best feature index
                 and the best threshold, respectively.
         """
-        best_gain = np.NINF
+        best_gain = -np.inf
         split_index = None
         split_threshold = None
 
-        # iterating over the features indexes
+        # Compute parent impurity once
+        if self.criterion in ["entropy", "log_loss"]:
+            c_parent = self._compute_entropy(y)
+        elif self.criterion == "gini":
+            c_parent = self._compute_gini(y)
+        elif self.criterion == "squared_error":
+            c_parent = self._compute_squared_error(y)
+        elif self.criterion == "poisson":
+            c_parent = self._compute_poisson(y)
+        elif self.criterion == "absolute_error":
+            c_parent = self._compute_absolute_error(y)
+
         for feature_index in feature_indexes:
-            _X = X[:, feature_index].reshape(-1)
-            thresholds = np.unique(_X)
+            _X = X[:, feature_index]
+            sorted_indices = np.argsort(_X)
+            _X_sorted = _X[sorted_indices]
+            y_sorted = y[sorted_indices]
 
-            # iterating over the unique values (thresholds)
-            # for that particular feature
+            # Identify potential split points where the target changes
+            potential_split_indices = np.where(_X_sorted[:-1] != _X_sorted[1:])[0]
+            thresholds = (_X_sorted[potential_split_indices] + _X_sorted[potential_split_indices + 1]) / 2
+
             for threshold in thresholds:
-                information_gain = self._calculate_information_gain(
-                    X=_X, y=y, threshold=threshold
-                )
+                # Binary search to find the split point
+                left_count = np.searchsorted(_X_sorted, threshold, side='right')
+                n_l = left_count
+                n_r = len(y_sorted) - left_count
 
-                # updating the best information gain
-                if information_gain > best_gain:
+                if n_l < self.min_samples_leaf or n_r < self.min_samples_leaf:
+                    continue
+
+                y_left = y_sorted[:left_count]
+                y_right = y_sorted[left_count:]
+
+                # Compute child impurities
+                if self.criterion in ["entropy", "log_loss"]:
+                    c_l = self._compute_entropy(y_left)
+                    c_r = self._compute_entropy(y_right)
+                elif self.criterion == "gini":
+                    c_l = self._compute_gini(y_left)
+                    c_r = self._compute_gini(y_right)
+                elif self.criterion == "squared_error":
+                    c_l = self._compute_squared_error(y_left)
+                    c_r = self._compute_squared_error(y_right)
+                elif self.criterion == "poisson":
+                    c_l = self._compute_poisson(y_left)
+                    c_r = self._compute_poisson(y_right)
+                elif self.criterion == "absolute_error":
+                    c_l = self._compute_absolute_error(y_left)
+                    c_r = self._compute_absolute_error(y_right)
+
+                # Weighted average of child impurities
+                c_child = (n_l / len(y)) * c_l + (n_r / len(y)) * c_r
+
+                information_gain = c_parent - c_child
+
+                # Check impurity decrease condition
+                if information_gain > best_gain and information_gain >= self.min_impurity_decrease:
                     best_gain = information_gain
                     split_index = feature_index
                     split_threshold = threshold
@@ -273,65 +317,91 @@ class DecisionTreeBase(ABC):
         return best_gain, split_index, split_threshold
 
     def _calculate_information_gain(
-        self, X: np.ndarray, y: np.ndarray, threshold: Union[int, float]
+        self, X: np.ndarray, y: np.ndarray, threshold: Union[int, float], c_parent: float
     ) -> float:
         """
-        Auxiliary function responsible for calculating the information gain of a split.
+        Optimized function to calculate the information gain of a split.
 
         Args:
-            X (np.ndarray): the features array.
-            y (np.ndarray): the classes array.
+            X (np.ndarray): the feature array for a specific feature.
+            y (np.ndarray): the target array.
             threshold (Union[int, float]): the threshold for the split.
-        """
-        # creating the left and right children
-        left, right = self._create_split(X=X, threshold=threshold)
+            c_parent (float): precomputed impurity of the parent node.
 
-        # empty list, so the information gain should be zero
-        if len(left) == 0 or len(right) == 0:
-            return 0
+        Returns:
+            float: the information gain.
+        """
+        left_mask = X <= threshold
+        right_mask = X > threshold
 
         n = len(y)
-        n_l, n_r = len(left), len(right)
-        c_parent, c_l, c_r = 0, 0, 0
+        n_l = np.sum(left_mask)
+        n_r = n - n_l
 
-        # calculating the weighted average information gain of children
+        if n_l < self.min_samples_leaf or n_r < self.min_samples_leaf:
+            return 0
+
+        y_left = y[left_mask]
+        y_right = y[right_mask]
+
         if self.criterion in ["entropy", "log_loss"]:
-            c_parent = entropy(y)
-            c_l = entropy(y[left])
-            c_r = entropy(y[right])
+            c_l = self._compute_entropy(y_left)
+            c_r = self._compute_entropy(y_right)
         elif self.criterion == "gini":
-            c_parent = gini(y)
-            c_l = gini(y[left])
-            c_r = gini(y[right])
+            c_l = self._compute_gini(y_left)
+            c_r = self._compute_gini(y_right)
         elif self.criterion == "squared_error":
-            c_parent = squared_error(np.mean(y), y)
-            c_l = squared_error(np.mean(y[left]), y[left])
-            c_r = squared_error(np.mean(y[right]), y[right])
+            c_l = self._compute_squared_error(y_left)
+            c_r = self._compute_squared_error(y_right)
         elif self.criterion == "poisson":
-            c_parent = poisson(np.mean(y), y)
-            c_l = poisson(np.mean(y[left]), y[left])
-            c_r = poisson(np.mean(y[right]), y[right])
+            c_l = self._compute_poisson(y_left)
+            c_r = self._compute_poisson(y_right)
         elif self.criterion == "absolute_error":
-            c_parent = absolute_error(np.median(y), y)
-            c_l = absolute_error(np.median(y[left]), y[left])
-            c_r = absolute_error(np.median(y[right]), y[right])
+            c_l = self._compute_absolute_error(y_left)
+            c_r = self._compute_absolute_error(y_right)
 
         c_child = (n_l / n) * c_l + (n_r / n) * c_r
         information_gain = c_parent - c_child
-        impurity_decrease = np.NINF
 
-        if n > 0:
-            impurity_decrease = n / (
-                self.n_samples_ * (c_parent - ((n_r / n) * c_r) - ((n_l / n)) * c_l)
-            )
-
-        # checking if the impurity decrease is bigger than
-        # the established minimum value
-        if impurity_decrease >= self.min_impurity_decrease:
+        if information_gain >= self.min_impurity_decrease:
             return information_gain
 
         return 0
 
+    # Define optimized impurity computation methods
+    def _compute_entropy(self, y: np.ndarray) -> float:
+        if len(y) == 0:
+            return 0
+        counts = np.bincount(y)
+        probabilities = counts / len(y)
+        probabilities = probabilities[probabilities > 0]
+        return -np.sum(probabilities * np.log2(probabilities))
+
+    def _compute_gini(self, y: np.ndarray) -> float:
+        if len(y) == 0:
+            return 0
+        counts = np.bincount(y)
+        probabilities = counts / len(y)
+        return 1.0 - np.sum(probabilities ** 2)
+
+    def _compute_squared_error(self, y: np.ndarray) -> float:
+        if len(y) == 0:
+            return 0
+        mean = np.mean(y)
+        return np.mean((y - mean) ** 2)
+
+    def _compute_poisson(self, y: np.ndarray) -> float:
+        if len(y) == 0:
+            return 0
+        lambda_ = np.mean(y)
+        return np.mean(lambda_ - y * np.log(lambda_ + 1e-9))  # Added epsilon to prevent log(0)
+
+    def _compute_absolute_error(self, y: np.ndarray) -> float:
+        if len(y) == 0:
+            return 0
+        median = np.median(y)
+        return np.mean(np.abs(y - median))
+    
     def _create_split(
         self, X: np.ndarray, threshold: Union[int, float]
     ) -> Tuple[int, int]:
